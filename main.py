@@ -5,26 +5,17 @@ A high-performance video player supporting 1080p60 video and multitrack audio.
 """
 
 import sys
+import time
 import queue
 from typing import Optional
 from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication, QMainWindow
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QTimer
 
 from src.video_decoder import VideoDecoder, VideoFrame
 from src.audio_decoder import AudioManager
-from src.sync import SyncController
 from src.gui import MainPlayerWidget
-
-
-class PlayerSignals(QObject):
-    """Qt signals for cross-thread communication."""
-    frame_ready = pyqtSignal(object)  # VideoFrame
-    position_update = pyqtSignal(float)
-    duration_update = pyqtSignal(float)
-    fps_update = pyqtSignal(float)
-    playback_ended = pyqtSignal()
 
 
 class VideoPlayer:
@@ -32,22 +23,36 @@ class VideoPlayer:
     Main video player controller.
     
     Coordinates video decoding, audio playback, and GUI updates.
+    Uses a QTimer to pull frames from queue (avoids cross-thread signal issues).
     """
     
     def __init__(self, widget: MainPlayerWidget):
         self.widget = widget
-        self.signals = PlayerSignals()
         
         self._file_path: Optional[str] = None
         self._frame_queue: queue.Queue = queue.Queue(maxsize=60)
         
         self._video_decoder: Optional[VideoDecoder] = None
         self._audio_manager: Optional[AudioManager] = None
-        self._sync_controller: Optional[SyncController] = None
         
         self._is_playing = False
         self._duration = 0.0
         self._fps = 30.0
+        
+        # Playback timing
+        self._playback_start_time = 0.0
+        self._playback_start_pts = 0.0
+        self._current_pts = 0.0
+        self._last_frame: Optional[VideoFrame] = None
+        
+        # Frame display timer - runs on main thread
+        self._display_timer = QTimer()
+        self._display_timer.timeout.connect(self._on_display_tick)
+        
+        # Position update timer
+        self._position_timer = QTimer()
+        self._position_timer.timeout.connect(self._update_position_display)
+        self._position_timer.setInterval(100)  # Update every 100ms
         
         self._setup_connections()
     
@@ -62,11 +67,6 @@ class VideoPlayer:
         # Audio track controls
         self.widget.audio_panel.volume_changed.connect(self._on_volume_changed)
         self.widget.audio_panel.mute_toggled.connect(self._on_mute_toggled)
-        
-        # Internal signals
-        self.signals.frame_ready.connect(self._on_frame_ready)
-        self.signals.position_update.connect(self.widget.controls.set_position)
-        self.signals.duration_update.connect(self.widget.controls.set_duration)
     
     def open_file(self, file_path: str):
         """Open a video file."""
@@ -98,24 +98,27 @@ class VideoPlayer:
         else:
             self.widget.audio_panel.clear()
         
-        # Initialize sync controller
-        self._sync_controller = SyncController(
-            frame_queue=self._frame_queue,
-            on_frame_ready=self._emit_frame,
-            on_position_update=self._emit_position,
-        )
-        self._sync_controller.set_fps(self._fps)
-        
         # Update UI
         self.widget.controls.set_duration(self._video_decoder.duration)
         self.widget.controls.set_position(0.0)
         self.widget.controls.set_playing(False)
+        
+        # Set timer interval based on FPS
+        frame_interval = max(1, int(1000 / self._fps / 2))  # Poll at 2x frame rate
+        self._display_timer.setInterval(frame_interval)
         
         print(f"Opened: {file_path}")
         print(f"Resolution: {self._video_decoder.width}x{self._video_decoder.height}")
         print(f"Duration: {self._video_decoder.duration:.2f}s")
         print(f"FPS: {self._fps:.2f}")
         print(f"Audio tracks: {len(tracks)}")
+    
+    def _get_playback_time(self) -> float:
+        """Get current playback time based on system clock."""
+        if not self._is_playing:
+            return self._current_pts
+        elapsed = time.perf_counter() - self._playback_start_time
+        return self._playback_start_pts + elapsed
     
     def play(self):
         """Start or resume playback."""
@@ -124,6 +127,10 @@ class VideoPlayer:
         
         if not self._is_playing:
             self._is_playing = True
+            
+            # Set up timing
+            self._playback_start_time = time.perf_counter()
+            self._playback_start_pts = self._current_pts
             
             # Start video decoder if not already running
             if not self._video_decoder.is_alive():
@@ -138,12 +145,9 @@ class VideoPlayer:
                 else:
                     self._audio_manager.resume_all()
             
-            # Start sync controller
-            if self._sync_controller:
-                if not self._sync_controller._running:
-                    self._sync_controller.start()
-                else:
-                    self._sync_controller.resume()
+            # Start display timer
+            self._display_timer.start()
+            self._position_timer.start()
             
             self.widget.controls.set_playing(True)
     
@@ -152,11 +156,14 @@ class VideoPlayer:
         if self._is_playing:
             self._is_playing = False
             
-            # Pause sync controller first to stop frame consumption
-            if self._sync_controller:
-                self._sync_controller.pause()
+            # Stop timers first
+            self._display_timer.stop()
+            self._position_timer.stop()
             
-            # Then pause decoders
+            # Save current position
+            self._current_pts = self._get_playback_time()
+            
+            # Pause decoders
             if self._video_decoder:
                 self._video_decoder.pause()
             
@@ -167,22 +174,32 @@ class VideoPlayer:
     
     def seek(self, position: float):
         """Seek to a position in seconds."""
+        self._current_pts = position
+        self._playback_start_pts = position
+        self._playback_start_time = time.perf_counter()
+        
+        # Clear frame queue
+        while not self._frame_queue.empty():
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                break
+        
         if self._video_decoder:
             self._video_decoder.seek(position)
         
         if self._audio_manager:
             self._audio_manager.seek_all(position)
         
-        if self._sync_controller:
-            self._sync_controller.seek(position)
+        self.widget.controls.set_position(position)
     
     def stop(self):
         """Stop playback and clean up."""
         self._is_playing = False
         
-        if self._sync_controller:
-            self._sync_controller.stop()
-            self._sync_controller = None
+        # Stop timers
+        self._display_timer.stop()
+        self._position_timer.stop()
         
         if self._video_decoder:
             self._video_decoder.stop()
@@ -199,31 +216,58 @@ class VideoPlayer:
             except queue.Empty:
                 break
         
+        self._current_pts = 0.0
+        self._last_frame = None
         self.widget.video_widget.clear()
         self.widget.controls.set_playing(False)
+    
+    def _on_display_tick(self):
+        """Called by timer to display next frame."""
+        if not self._is_playing:
+            return
+        
+        current_time = self._get_playback_time()
+        
+        # Get frames from queue and display the appropriate one
+        displayed = False
+        while True:
+            try:
+                frame = self._frame_queue.get_nowait()
+                self._last_frame = frame
+                
+                # If this frame is current or we're behind, display it
+                if frame.pts <= current_time + (1.0 / self._fps):
+                    self.widget.video_widget.display_frame(frame.image)
+                    self._current_pts = frame.pts
+                    displayed = True
+                    
+                    # If we're caught up, stop
+                    if frame.pts >= current_time - (1.0 / self._fps):
+                        break
+                else:
+                    # Frame is for the future, put it back (can't, so just display)
+                    self.widget.video_widget.display_frame(frame.image)
+                    self._current_pts = frame.pts
+                    displayed = True
+                    break
+                    
+            except queue.Empty:
+                break
+    
+    def _update_position_display(self):
+        """Update the position display in UI."""
+        if self._is_playing:
+            self.widget.controls.set_position(self._get_playback_time())
     
     def _on_duration_received(self, duration: float):
         """Handle duration info from decoder."""
         self._duration = duration
-        self.signals.duration_update.emit(duration)
     
     def _on_fps_received(self, fps: float):
         """Handle FPS info from decoder."""
         self._fps = fps
-        if self._sync_controller:
-            self._sync_controller.set_fps(fps)
-    
-    def _emit_frame(self, frame: VideoFrame):
-        """Emit frame signal (from sync thread)."""
-        self.signals.frame_ready.emit(frame)
-    
-    def _emit_position(self, position: float):
-        """Emit position update signal (from sync thread)."""
-        self.signals.position_update.emit(position)
-    
-    def _on_frame_ready(self, frame: VideoFrame):
-        """Handle frame ready signal (in main thread)."""
-        self.widget.video_widget.display_frame(frame.image)
+        frame_interval = max(1, int(1000 / fps / 2))
+        self._display_timer.setInterval(frame_interval)
     
     def _on_volume_changed(self, track_id: int, volume: float):
         """Handle volume change for a track."""
