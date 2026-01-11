@@ -169,9 +169,9 @@ class AudioTrackPlayer(threading.Thread):
                             except queue.Empty:
                                 break
                 
-                # Decode audio frames
+                # Decode audio frames from our specific stream
                 try:
-                    for frame in self.container.decode(audio=0):
+                    for packet in self.container.demux(self.audio_stream):
                         if not self._running:
                             break
                         
@@ -180,44 +180,48 @@ class AudioTrackPlayer(threading.Thread):
                             if self._seek_requested:
                                 break
                         
-                        # Check pause - poll instead of blocking
-                        while self._paused and self._running:
-                            time.sleep(0.05)
-                        
-                        if not self._running:
-                            break
-                        
-                        # Resample frame
-                        resampled = resampler.resample(frame)
-                        
-                        for res_frame in resampled:
-                            # Convert to numpy array
-                            audio_data = res_frame.to_ndarray()
+                        for frame in packet.decode():
+                            if not self._running:
+                                break
                             
-                            # Convert from planar to interleaved
-                            if audio_data.ndim > 1:
-                                audio_data = audio_data.T.flatten()
+                            # Check pause - poll instead of blocking
+                            while self._paused and self._running:
+                                time.sleep(0.05)
                             
-                            # Reshape for stereo
-                            audio_data = audio_data.reshape(-1, self.output_channels)
+                            if not self._running:
+                                break
                             
-                            # Calculate PTS
-                            pts = float(frame.pts * self.audio_stream.time_base) if frame.pts else 0.0
-                            duration = len(audio_data) / self.sample_rate
+                            # Resample frame
+                            resampled = resampler.resample(frame)
                             
-                            chunk = AudioChunk(
-                                data=audio_data.astype(np.float32),
-                                pts=pts,
-                                duration=duration
-                            )
-                            
-                            # Wait for space in queue with pause checking
-                            while self._running and not self._seek_requested and not self._paused:
-                                try:
-                                    self._audio_queue.put(chunk, timeout=0.02)
-                                    break
-                                except queue.Full:
-                                    continue
+                            for res_frame in resampled:
+                                # Convert to numpy array
+                                audio_data = res_frame.to_ndarray()
+                                
+                                # Convert from planar to interleaved
+                                if audio_data.ndim > 1:
+                                    audio_data = audio_data.T.flatten()
+                                
+                                # Reshape for stereo
+                                audio_data = audio_data.reshape(-1, self.output_channels)
+                                
+                                # Calculate PTS
+                                pts = float(frame.pts * self.audio_stream.time_base) if frame.pts else 0.0
+                                duration = len(audio_data) / self.sample_rate
+                                
+                                chunk = AudioChunk(
+                                    data=audio_data.astype(np.float32),
+                                    pts=pts,
+                                    duration=duration
+                                )
+                                
+                                # Wait for space in queue with pause checking
+                                while self._running and not self._seek_requested and not self._paused:
+                                    try:
+                                        self._audio_queue.put(chunk, timeout=0.02)
+                                        break
+                                    except queue.Full:
+                                        continue
                     else:
                         # End of stream
                         self._running = False

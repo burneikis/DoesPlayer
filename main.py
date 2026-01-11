@@ -44,6 +44,7 @@ class VideoPlayer:
         self._playback_start_pts = 0.0
         self._current_pts = 0.0
         self._last_frame: Optional[VideoFrame] = None
+        self._pending_frame: Optional[VideoFrame] = None
         
         # Frame display timer - runs on main thread
         self._display_timer = QTimer()
@@ -103,8 +104,8 @@ class VideoPlayer:
         self.widget.controls.set_position(0.0)
         self.widget.controls.set_playing(False)
         
-        # Set timer interval based on FPS
-        frame_interval = max(1, int(1000 / self._fps / 2))  # Poll at 2x frame rate
+        # Set timer interval based on FPS (poll faster than frame rate for smoothness)
+        frame_interval = max(1, int(1000 / self._fps / 2))
         self._display_timer.setInterval(frame_interval)
         
         print(f"Opened: {file_path}")
@@ -128,28 +129,36 @@ class VideoPlayer:
         if not self._is_playing:
             self._is_playing = True
             
-            # Set up timing
-            self._playback_start_time = time.perf_counter()
-            self._playback_start_pts = self._current_pts
-            
             # Start video decoder if not already running
             if not self._video_decoder.is_alive():
                 self._video_decoder.start()
+                # Give decoder time to buffer initial frames
+                QTimer.singleShot(100, self._start_playback)
             else:
                 self._video_decoder.resume()
+                self._start_playback()
+    
+    def _start_playback(self):
+        """Actually start playback after decoder is ready."""
+        if not self._is_playing:
+            return
             
-            # Start audio
-            if self._audio_manager:
-                if not any(p.is_alive() for p in self._audio_manager.players.values()):
-                    self._audio_manager.start_all()
-                else:
-                    self._audio_manager.resume_all()
-            
-            # Start display timer
-            self._display_timer.start()
-            self._position_timer.start()
-            
-            self.widget.controls.set_playing(True)
+        # Set up timing
+        self._playback_start_time = time.perf_counter()
+        self._playback_start_pts = self._current_pts
+        
+        # Start audio
+        if self._audio_manager:
+            if not any(p.is_alive() for p in self._audio_manager.players.values()):
+                self._audio_manager.start_all()
+            else:
+                self._audio_manager.resume_all()
+        
+        # Start display timer
+        self._display_timer.start()
+        self._position_timer.start()
+        
+        self.widget.controls.set_playing(True)
     
     def pause(self):
         """Pause playback."""
@@ -177,6 +186,7 @@ class VideoPlayer:
         self._current_pts = position
         self._playback_start_pts = position
         self._playback_start_time = time.perf_counter()
+        self._pending_frame = None
         
         # Clear frame queue
         while not self._frame_queue.empty():
@@ -218,6 +228,7 @@ class VideoPlayer:
         
         self._current_pts = 0.0
         self._last_frame = None
+        self._pending_frame = None
         self.widget.video_widget.clear()
         self.widget.controls.set_playing(False)
     
@@ -227,32 +238,37 @@ class VideoPlayer:
             return
         
         current_time = self._get_playback_time()
+        frame_to_display = None
         
-        # Get frames from queue and display the appropriate one
-        displayed = False
+        # First check if we have a pending frame from last tick that's now ready
+        if self._pending_frame is not None:
+            if self._pending_frame.pts <= current_time:
+                frame_to_display = self._pending_frame
+                self._pending_frame = None
+            else:
+                # Pending frame still not ready, don't pull more from queue
+                return
+        
+        # Get frames from queue
         while True:
             try:
                 frame = self._frame_queue.get_nowait()
-                self._last_frame = frame
                 
-                # If this frame is current or we're behind, display it
-                if frame.pts <= current_time + (1.0 / self._fps):
-                    self.widget.video_widget.display_frame(frame.image)
-                    self._current_pts = frame.pts
-                    displayed = True
-                    
-                    # If we're caught up, stop
-                    if frame.pts >= current_time - (1.0 / self._fps):
-                        break
+                if frame.pts <= current_time:
+                    # This frame should be displayed (or skipped if we find a newer one)
+                    frame_to_display = frame
                 else:
-                    # Frame is for the future, put it back (can't, so just display)
-                    self.widget.video_widget.display_frame(frame.image)
-                    self._current_pts = frame.pts
-                    displayed = True
+                    # This frame is for the future - save it for later
+                    self._pending_frame = frame
                     break
                     
             except queue.Empty:
                 break
+        
+        # Display the frame if we have one
+        if frame_to_display is not None:
+            self.widget.video_widget.display_frame(frame_to_display.image)
+            self._current_pts = frame_to_display.pts
     
     def _update_position_display(self):
         """Update the position display in UI."""
