@@ -12,7 +12,7 @@ from typing import Optional
 from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSettings
 from PyQt6.QtGui import QKeyEvent, QPalette, QColor
 
 from src.video_decoder import VideoDecoder, VideoFrame
@@ -500,7 +500,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("DoesPlayer")
         self.setMinimumSize(800, 600)
-        self.resize(1280, 720)
+        
+        # Load saved geometry or use defaults
+        self._settings = QSettings("DoesPlayer", "DoesPlayer")
+        self._restore_geometry()
         
         # Set dark theme
         self.setStyleSheet("""
@@ -550,6 +553,18 @@ class MainWindow(QMainWindow):
         
         # Focus policy for keyboard events
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    
+    def _restore_geometry(self):
+        """Restore window geometry from settings."""
+        geometry = self._settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        else:
+            self.resize(1280, 720)
+    
+    def _save_geometry(self):
+        """Save window geometry to settings."""
+        self._settings.setValue("geometry", self.saveGeometry())
     
     def _open_file(self):
         """Open a video file via dialog."""
@@ -611,6 +626,7 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Handle window close."""
+        self._save_geometry()
         self.player.stop()
         event.accept()
 
