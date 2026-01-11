@@ -154,6 +154,12 @@ class VideoPlayer:
         if not self._is_playing:
             self._is_playing = True
 
+            # Clear frame cache since we're resuming normal playback
+            self._video_decoder.clear_frame_cache()
+            
+            # Seek decoder to current position to ensure proper sync after frame stepping
+            self._video_decoder.seek(self._current_pts)
+
             # Start video decoder if not already running
             if not self._video_decoder.is_alive():
                 self._video_decoder.start()
@@ -443,8 +449,8 @@ class VideoPlayer:
             self.widget.show_notification("End", NOTIFICATION_DURATION_MS)
             return
         
-        # Get the frame at the target position
-        frame = self._video_decoder.get_frame_at_position(target_pos)
+        # Get the frame at the target position (pass current position and direction for cache optimization)
+        frame = self._video_decoder.get_frame_at_position(target_pos, current_pos, direction)
         
         if frame:
             # Display the frame
@@ -467,8 +473,8 @@ class VideoPlayer:
                 except queue.Empty:
                     break
             
-            # Request video decoder to seek to new position
-            self._video_decoder.seek(frame.pts)
+            # Don't seek the video decoder - let the cache handle continuous stepping
+            # Only seek when playback resumes
             
             # Show frame number notification
             frame_num = int(frame.pts * self._fps) + 1
