@@ -12,9 +12,7 @@ from typing import Optional
 from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog
-from PyQt6.QtCore import Qt, QTimer
-
-import json
+from PyQt6.QtCore import Qt, QTimer, QSettings
 from PyQt6.QtGui import QKeyEvent, QPalette, QColor
 
 from src.video_decoder import VideoDecoder, VideoFrame
@@ -155,6 +153,12 @@ class VideoPlayer:
 
         if not self._is_playing:
             self._is_playing = True
+
+            # Clear frame cache since we're resuming normal playback
+            self._video_decoder.clear_frame_cache()
+            
+            # Seek decoder to current position to ensure proper sync after frame stepping
+            self._video_decoder.seek(self._current_pts)
 
             # Start video decoder if not already running
             if not self._video_decoder.is_alive():
@@ -414,6 +418,72 @@ class VideoPlayer:
         sign = "+" if seconds > 0 else ""
         self.widget.show_notification(f"Skip {sign}{int(seconds)}s", 600)
 
+    def step_frame(self, direction: int):
+        """
+        Step forward or backward by one frame.
+        
+        Args:
+            direction: 1 for forward, -1 for backward
+        """
+        if not self._video_decoder:
+            return
+        
+        # Pause playback if playing
+        was_playing = self._is_playing
+        if was_playing:
+            self.pause()
+        
+        # Calculate target position (one frame forward or backward)
+        frame_duration = self._video_decoder.frame_duration
+        current_pos = self._current_pts
+        target_pos = current_pos + (direction * frame_duration)
+        
+        # Clamp to valid range
+        target_pos = max(0.0, min(target_pos, self._duration - frame_duration))
+        
+        # Don't step if we're already at the boundary
+        if direction < 0 and current_pos <= 0.001:
+            self.widget.show_notification("Start", NOTIFICATION_DURATION_MS)
+            return
+        if direction > 0 and current_pos >= self._duration - frame_duration:
+            self.widget.show_notification("End", NOTIFICATION_DURATION_MS)
+            return
+        
+        # Get the frame at the target position (pass current position and direction for cache optimization)
+        frame = self._video_decoder.get_frame_at_position(target_pos, current_pos, direction)
+        
+        if frame:
+            # Display the frame
+            self.widget.video_widget.display_frame(frame.image)
+            self._current_pts = frame.pts
+            self._playback_start_pts = frame.pts
+            
+            # Update UI
+            self.widget.controls.set_position(frame.pts)
+            self.widget.update_time_display(frame.pts, self._duration)
+            
+            # Sync audio position for when playback resumes
+            if self._audio_manager:
+                self._audio_manager.seek_all(frame.pts)
+            
+            # Clear the frame queue since we've manually positioned
+            while not self._frame_queue.empty():
+                try:
+                    self._frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+            
+            # Don't seek the video decoder - let the cache handle continuous stepping
+            # Only seek when playback resumes
+            
+            # Show frame number notification
+            frame_num = int(frame.pts * self._fps) + 1
+            total_frames = int(self._duration * self._fps)
+            arrow = "→" if direction > 0 else "←"
+            self.widget.show_notification(f"{arrow} Frame {frame_num}/{total_frames}", NOTIFICATION_DURATION_MS)
+        else:
+            self.widget.show_notification("Frame not found", NOTIFICATION_DURATION_MS)
+
     @property
     def is_playing(self) -> bool:
         return self._is_playing
@@ -430,19 +500,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("DoesPlayer")
         self.setMinimumSize(800, 600)
-
-        # Try to load last window size
-        width, height = 1280, 720
-        try:
-            if self.CONFIG_PATH.exists():
-                with open(self.CONFIG_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    width = int(data.get("width", width))
-                    height = int(data.get("height", height))
-        except Exception:
-            pass  # Ignore errors, use default size
-        self.resize(width, height)
-
+        
+        # Load saved geometry or use defaults
+        self._settings = QSettings("DoesPlayer", "DoesPlayer")
+        self._restore_geometry()
+        
         # Set dark theme
         self.setStyleSheet("""
             QMainWindow {
@@ -492,6 +554,18 @@ class MainWindow(QMainWindow):
         # Focus policy for keyboard events
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     
+    def _restore_geometry(self):
+        """Restore window geometry from settings."""
+        geometry = self._settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        else:
+            self.resize(1280, 720)
+    
+    def _save_geometry(self):
+        """Save window geometry to settings."""
+        self._settings.setValue("geometry", self.saveGeometry())
+    
     def _open_file(self):
         """Open a video file via dialog."""
         filepath, _ = QFileDialog.getOpenFileName(
@@ -531,6 +605,10 @@ class MainWindow(QMainWindow):
 
         if key == Qt.Key.Key_Space:
             self.player.toggle_playback()
+        elif key == Qt.Key.Key_Left:
+            self.player.step_frame(-1)  # Step back one frame
+        elif key == Qt.Key.Key_Right:
+            self.player.step_frame(1)  # Step forward one frame
         elif key == Qt.Key.Key_Up:
             self.player.adjust_volume(VOLUME_STEP)
         elif key == Qt.Key.Key_Down:
@@ -547,15 +625,8 @@ class MainWindow(QMainWindow):
             super().keyPressEvent(event)
     
     def closeEvent(self, event):
-        """Handle window close: save window size and stop player."""
-        # Save window size
-        try:
-            size = self.size()
-            data = {"width": size.width(), "height": size.height()}
-            with open(self.CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-        except Exception:
-            pass  # Ignore errors
+        """Handle window close."""
+        self._save_geometry()
         self.player.stop()
         event.accept()
 

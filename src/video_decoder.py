@@ -15,6 +15,7 @@ import numpy as np
 PAUSE_POLL_INTERVAL = 0.05  # seconds
 QUEUE_PUT_TIMEOUT = 0.02  # seconds
 DEFAULT_FPS = 30.0
+FRAME_CACHE_SIZE = 120  # Number of frames to cache for stepping
 
 @dataclass
 class VideoFrame:
@@ -58,6 +59,16 @@ class VideoDecoder(threading.Thread):
         self.duration: float = 0.0
         self.fps: float = DEFAULT_FPS
         self.width: int = 0
+        
+        # Frame cache for efficient stepping
+        self._frame_cache: list[VideoFrame] = []
+        self._frame_cache_lock = threading.Lock()
+        
+        # Persistent container for frame stepping (avoids reopening file)
+        self._step_container: Optional[av.container.InputContainer] = None
+        self._step_stream: Optional[av.video.stream.VideoStream] = None
+        self._step_decoder = None  # Generator for sequential decoding
+        self._step_last_pts: float = -1.0
         self.height: int = 0
         
     def open(self) -> bool:
@@ -225,6 +236,8 @@ class VideoDecoder(threading.Thread):
         self._paused = False  # Unblock if paused
         if self.container:
             self.container.close()
+        self._close_step_container()
+        self.clear_frame_cache()
     
     def get_audio_tracks(self) -> list:
         """Get list of audio track info from the container."""
@@ -240,3 +253,169 @@ class VideoDecoder(threading.Thread):
                         'language': stream.language or f'Track {len(tracks) + 1}'
                     })
         return tracks
+
+    def _ensure_step_container(self):
+        """Ensure the step container is open for frame stepping."""
+        if self._step_container is None:
+            self._step_container = av.open(self.file_path)
+            for stream in self._step_container.streams:
+                if stream.type == 'video':
+                    self._step_stream = stream
+                    break
+            self._step_decoder = None
+            self._step_last_pts = -1.0
+
+    def _add_to_cache(self, frame: VideoFrame):
+        """Add a frame to the cache, maintaining size limit."""
+        with self._frame_cache_lock:
+            # Check if frame already in cache
+            for cached in self._frame_cache:
+                if abs(cached.pts - frame.pts) < 0.001:
+                    return
+            
+            self._frame_cache.append(frame)
+            # Sort by pts
+            self._frame_cache.sort(key=lambda f: f.pts)
+            
+            # Trim cache if too large
+            while len(self._frame_cache) > FRAME_CACHE_SIZE:
+                self._frame_cache.pop(0)
+
+    def _get_from_cache(self, target_pts: float) -> Optional[VideoFrame]:
+        """Try to get a frame from cache. Returns None if not found."""
+        with self._frame_cache_lock:
+            tolerance = 0.5 / self.fps
+            for frame in self._frame_cache:
+                if abs(frame.pts - target_pts) < tolerance:
+                    return frame
+        return None
+
+    def _get_adjacent_from_cache(self, current_pts: float, direction: int) -> Optional[VideoFrame]:
+        """Get the next or previous frame from cache relative to current position."""
+        with self._frame_cache_lock:
+            if not self._frame_cache:
+                return None
+            
+            tolerance = 0.5 / self.fps
+            
+            if direction > 0:  # Forward
+                # Find first frame after current
+                for frame in self._frame_cache:
+                    if frame.pts > current_pts + tolerance:
+                        return frame
+            else:  # Backward
+                # Find last frame before current
+                prev_frame = None
+                for frame in self._frame_cache:
+                    if frame.pts < current_pts - tolerance:
+                        prev_frame = frame
+                    else:
+                        break
+                return prev_frame
+        return None
+
+    def clear_frame_cache(self):
+        """Clear the frame cache (call after seeking)."""
+        with self._frame_cache_lock:
+            self._frame_cache.clear()
+        self._step_decoder = None
+        self._step_last_pts = -1.0
+
+    def get_frame_at_position(self, target_pts: float, current_pts: float = -1.0, direction: int = 0) -> Optional[VideoFrame]:
+        """
+        Get a single frame at or just after the target position.
+        
+        Uses caching and persistent container for efficient frame stepping.
+        
+        Args:
+            target_pts: Target presentation timestamp in seconds
+            current_pts: Current position (for smart cache lookup)
+            direction: Step direction (1=forward, -1=backward, 0=seek)
+            
+        Returns:
+            VideoFrame at the target position, or None if not found
+        """
+        if not self.container or not self.video_stream:
+            return None
+        
+        target_pts = max(0.0, min(target_pts, self.duration))
+        
+        # First, try to get from cache if stepping
+        if direction != 0 and current_pts >= 0:
+            cached = self._get_adjacent_from_cache(current_pts, direction)
+            if cached is not None:
+                return cached
+        
+        # Also check if target is directly in cache
+        cached = self._get_from_cache(target_pts)
+        if cached is not None:
+            return cached
+        
+        try:
+            self._ensure_step_container()
+            
+            if self._step_stream is None:
+                return None
+            
+            # Check if we can continue from last position (forward stepping)
+            can_continue = (
+                direction >= 0 and 
+                self._step_decoder is not None and 
+                self._step_last_pts >= 0 and
+                target_pts > self._step_last_pts and
+                target_pts - self._step_last_pts < 2.0  # Within 2 seconds
+            )
+            
+            if not can_continue:
+                # Need to seek - seek to keyframe before target
+                target_ts = int(target_pts / self._step_stream.time_base)
+                self._step_container.seek(target_ts, stream=self._step_stream, backward=True)
+                self._step_decoder = self._step_container.decode(video=0)
+            
+            # Decode frames until we reach target
+            tolerance = 0.5 / self.fps
+            
+            for frame in self._step_decoder:
+                pts = float(frame.pts * self._step_stream.time_base) if frame.pts else 0.0
+                self._step_last_pts = pts
+                
+                # Convert frame to RGB
+                rgb_frame = frame.to_ndarray(format='rgb24')
+                video_frame = VideoFrame(
+                    image=rgb_frame,
+                    pts=pts,
+                    frame_number=int(pts * self.fps)
+                )
+                
+                # Add to cache for future use
+                self._add_to_cache(video_frame)
+                
+                # If this frame is at or past our target, return it
+                if pts >= target_pts - tolerance:
+                    return video_frame
+            
+            # Ran out of frames
+            return None
+                
+        except Exception as e:
+            print(f"Error getting frame at position {target_pts}: {e}")
+            # Reset step container on error
+            self._close_step_container()
+            return None
+
+    def _close_step_container(self):
+        """Close the step container."""
+        if self._step_container:
+            try:
+                self._step_container.close()
+            except Exception:
+                pass
+            self._step_container = None
+            self._step_stream = None
+            self._step_decoder = None
+            self._step_last_pts = -1.0
+
+    @property
+    def frame_duration(self) -> float:
+        """Get duration of a single frame in seconds."""
+        return 1.0 / self.fps if self.fps > 0 else 1.0 / DEFAULT_FPS
