@@ -13,6 +13,8 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog
 from PyQt6.QtCore import Qt, QTimer
+
+import json
 from PyQt6.QtGui import QKeyEvent, QPalette, QColor
 
 from src.video_decoder import VideoDecoder, VideoFrame
@@ -423,13 +425,24 @@ class VideoPlayer:
 
 class MainWindow(QMainWindow):
     """Main application window with keyboard controls."""
-    
+    CONFIG_PATH = Path(__file__).parent / "window_config.json"
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DoesPlayer")
         self.setMinimumSize(800, 600)
-        self.resize(1280, 720)
-        
+
+        # Try to load last window size
+        width, height = 1280, 720
+        try:
+            if self.CONFIG_PATH.exists():
+                with open(self.CONFIG_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    width = int(data.get("width", width))
+                    height = int(data.get("height", height))
+        except Exception:
+            pass  # Ignore errors, use default size
+        self.resize(width, height)
+
         # Set dark theme
         self.setStyleSheet("""
             QMainWindow {
@@ -468,14 +481,14 @@ class MainWindow(QMainWindow):
                 border-radius: 3px;
             }
         """)
-        
+
         # Create main widget
         self.player_widget = MainPlayerWidget()
         self.setCentralWidget(self.player_widget)
-        
+
         # Create player controller
         self.player = VideoPlayer(self.player_widget)
-        
+
         # Focus policy for keyboard events
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     
@@ -534,7 +547,15 @@ class MainWindow(QMainWindow):
             super().keyPressEvent(event)
     
     def closeEvent(self, event):
-        """Handle window close."""
+        """Handle window close: save window size and stop player."""
+        # Save window size
+        try:
+            size = self.size()
+            data = {"width": size.width(), "height": size.height()}
+            with open(self.CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception:
+            pass  # Ignore errors
         self.player.stop()
         event.accept()
 
