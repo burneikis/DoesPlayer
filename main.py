@@ -2,6 +2,7 @@
 DoesPlayer - Python Video Player
 
 A high-performance video player supporting 1080p60 video and multitrack audio.
+Features: notifications, keyboard controls, audio mixer panel.
 """
 
 import sys
@@ -10,8 +11,9 @@ import queue
 from typing import Optional
 from pathlib import Path
 
-from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QKeyEvent, QPalette, QColor
 
 from src.video_decoder import VideoDecoder, VideoFrame
 from src.audio_decoder import AudioManager
@@ -38,6 +40,9 @@ class VideoPlayer:
         self._is_playing = False
         self._duration = 0.0
         self._fps = 30.0
+        
+        # Master volume for all tracks
+        self._master_volume = 1.0
         
         # Playback timing
         self._playback_start_time = 0.0
@@ -99,10 +104,14 @@ class VideoPlayer:
         else:
             self.widget.audio_panel.clear()
         
+        # Hide welcome overlay, show time display
+        self.widget.hide_welcome()
+        
         # Update UI
         self.widget.controls.set_duration(self._video_decoder.duration)
         self.widget.controls.set_position(0.0)
         self.widget.controls.set_playing(False)
+        self.widget.update_time_display(0.0, self._video_decoder.duration)
         
         # Set timer interval based on FPS (poll faster than frame rate for smoothness)
         frame_interval = max(1, int(1000 / self._fps / 2))
@@ -273,7 +282,9 @@ class VideoPlayer:
     def _update_position_display(self):
         """Update the position display in UI."""
         if self._is_playing:
-            self.widget.controls.set_position(self._get_playback_time())
+            current_time = self._get_playback_time()
+            self.widget.controls.set_position(current_time)
+            self.widget.update_time_display(current_time, self._duration)
     
     def _on_duration_received(self, duration: float):
         """Handle duration info from decoder."""
@@ -295,14 +306,53 @@ class VideoPlayer:
         if self._audio_manager:
             self._audio_manager.set_track_muted(track_id, muted)
 
+    def toggle_playback(self):
+        """Toggle play/pause state."""
+        if self._is_playing:
+            self.pause()
+            self.widget.show_notification("Pause", 600)
+        else:
+            self.play()
+            self.widget.show_notification("Play", 600)
+
+    def change_volume(self, delta: float):
+        """Change master volume by delta amount."""
+        if not self._audio_manager:
+            return
+        new_volume = self._master_volume + delta
+        # Round to nearest 5% to avoid floating-point precision issues
+        self._master_volume = max(0.0, min(1.0, round(new_volume * 20) / 20))
+        # Apply to all audio tracks
+        for i in range(len(self._audio_manager.players)):
+            self._audio_manager.set_track_volume(i, self._master_volume)
+            self.widget.audio_panel.set_track_volume(i, self._master_volume)
+        self.widget.show_notification(f"Volume: {int(self._master_volume * 100)}%", 600)
+
+    def skip_time(self, seconds: float):
+        """Skip forward or backward by the given number of seconds."""
+        if not self._video_decoder:
+            return
+        new_time = max(0.0, min(self._duration, self._get_playback_time() + seconds))
+        self.seek(new_time)
+        sign = "+" if seconds > 0 else ""
+        self.widget.show_notification(f"Skip {sign}{int(seconds)}s", 600)
+
+    @property
+    def is_playing(self) -> bool:
+        return self._is_playing
+
+    @property
+    def has_file(self) -> bool:
+        return self._video_decoder is not None
+
 
 class MainWindow(QMainWindow):
-    """Main application window."""
+    """Main application window with keyboard controls."""
     
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DoesPlayer")
-        self.setMinimumSize(1024, 600)
+        self.setMinimumSize(800, 600)
         self.resize(1280, 720)
         
         # Set dark theme
@@ -350,6 +400,63 @@ class MainWindow(QMainWindow):
         
         # Create player controller
         self.player = VideoPlayer(self.player_widget)
+        
+        # Focus policy for keyboard events
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    
+    def _open_file(self):
+        """Open a video file via dialog."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Video",
+            "",
+            "Video Files (*.mp4 *.mkv *.avi *.mov *.webm *.m4v);;All Files (*)"
+        )
+        if filepath:
+            self.player.open_file(filepath)
+            self.setWindowTitle(f"DoesPlayer - {filepath}")
+
+    def _toggle_audio_mixer(self):
+        """Toggle audio mixer panel visibility."""
+        visible = self.player_widget.toggle_audio_mixer()
+        self.player_widget.show_notification("Mixer: On" if visible else "Mixer: Off", 600)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        """Handle keyboard input."""
+        key = event.key()
+        modifiers = event.modifiers()
+
+        # Ctrl+O / Cmd+O to open file (works without file loaded)
+        if key == Qt.Key.Key_O and (modifiers & Qt.KeyboardModifier.ControlModifier):
+            self._open_file()
+            return
+
+        # A to toggle audio mixer (works without file loaded)
+        if key == Qt.Key.Key_A:
+            self._toggle_audio_mixer()
+            return
+
+        # The rest require a file to be loaded
+        if not self.player.has_file:
+            super().keyPressEvent(event)
+            return
+
+        if key == Qt.Key.Key_Space:
+            self.player.toggle_playback()
+        elif key == Qt.Key.Key_Up:
+            self.player.change_volume(0.05)
+        elif key == Qt.Key.Key_Down:
+            self.player.change_volume(-0.05)
+        elif key == Qt.Key.Key_BracketLeft:
+            self.player.skip_time(-5)  # [ = 5s back
+        elif key == Qt.Key.Key_BracketRight:
+            self.player.skip_time(10)  # ] = 10s forward
+        elif key == Qt.Key.Key_BraceLeft:
+            self.player.skip_time(-15)  # { = 15s back (Shift+[)
+        elif key == Qt.Key.Key_BraceRight:
+            self.player.skip_time(30)  # } = 30s forward (Shift+])
+        else:
+            super().keyPressEvent(event)
     
     def closeEvent(self, event):
         """Handle window close."""
@@ -361,6 +468,24 @@ def main():
     """Application entry point."""
     app = QApplication(sys.argv)
     app.setApplicationName("DoesPlayer")
+    app.setStyle("Fusion")
+    
+    # Dark theme palette
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.Base, QColor(25, 25, 25))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.Text, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 0))
+    palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(0, 0, 0))
+    app.setPalette(palette)
     
     window = MainWindow()
     window.show()
@@ -370,6 +495,7 @@ def main():
         file_path = sys.argv[1]
         if Path(file_path).exists():
             window.player.open_file(file_path)
+            window.setWindowTitle(f"DoesPlayer - {file_path}")
     
     sys.exit(app.exec())
 
