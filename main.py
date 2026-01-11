@@ -495,7 +495,7 @@ class VideoPlayer:
 
 class MainWindow(QMainWindow):
     """Main application window with keyboard controls."""
-    
+    CONFIG_PATH = Path(__file__).parent / "window_config.json"
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DoesPlayer")
@@ -543,14 +543,14 @@ class MainWindow(QMainWindow):
                 border-radius: 3px;
             }
         """)
-        
+
         # Create main widget
         self.player_widget = MainPlayerWidget()
         self.setCentralWidget(self.player_widget)
-        
+
         # Create player controller
         self.player = VideoPlayer(self.player_widget)
-        
+
         # Focus policy for keyboard events
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     
