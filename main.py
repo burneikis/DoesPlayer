@@ -283,6 +283,15 @@ class VideoPlayer:
         """Update the position display in UI."""
         if self._is_playing:
             current_time = self._get_playback_time()
+            
+            # Check if we've reached the end of the video
+            if current_time >= self._duration:
+                current_time = self._duration
+                self.pause()
+                self.widget.controls.set_position(self._duration)
+                self.widget.update_time_display(self._duration, self._duration)
+                return
+            
             self.widget.controls.set_position(current_time)
             self.widget.update_time_display(current_time, self._duration)
     
