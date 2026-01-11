@@ -136,17 +136,20 @@ class SyncController:
         last_display_time = time.perf_counter()
         
         while self._running:
+            # Check if paused - use short sleep to stay responsive
             if not self.clock.is_running():
-                time.sleep(0.01)
+                time.sleep(0.05)
                 continue
             
             current_time = self.clock.get_time()
             
-            # Try to get the next frame
+            # Try to get the next frame - short timeout to stay responsive to pause
             try:
-                frame = self.frame_queue.get(timeout=0.01)
+                frame = self.frame_queue.get(timeout=0.05)
             except queue.Empty:
-                # No frame available, continue with timing
+                # No frame available, check if still running
+                if not self._running or not self.clock.is_running():
+                    continue
                 time.sleep(0.001)
                 continue
             
@@ -180,13 +183,13 @@ class SyncController:
                 while self.clock.get_time() < display_time and self._running:
                     pass
             
-            # Display the frame
-            if self.on_frame_ready and self._running:
+            # Display the frame (check pause state again)
+            if self.on_frame_ready and self._running and self.clock.is_running():
                 self.on_frame_ready(frame)
                 self._frames_displayed += 1
             
             # Update position callback
-            if self.on_position_update and self._frames_displayed % 10 == 0:
+            if self.on_position_update and self._frames_displayed % 10 == 0 and self._running:
                 self.on_position_update(frame_pts)
     
     def pause(self):

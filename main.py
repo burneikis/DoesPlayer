@@ -152,14 +152,16 @@ class VideoPlayer:
         if self._is_playing:
             self._is_playing = False
             
+            # Pause sync controller first to stop frame consumption
+            if self._sync_controller:
+                self._sync_controller.pause()
+            
+            # Then pause decoders
             if self._video_decoder:
                 self._video_decoder.pause()
             
             if self._audio_manager:
                 self._audio_manager.pause_all()
-            
-            if self._sync_controller:
-                self._sync_controller.pause()
             
             self.widget.controls.set_playing(False)
     

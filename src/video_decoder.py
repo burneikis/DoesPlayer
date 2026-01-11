@@ -48,8 +48,6 @@ class VideoDecoder(threading.Thread):
         self._seek_requested = False
         self._seek_target = 0.0
         self._lock = threading.Lock()
-        self._pause_event = threading.Event()
-        self._pause_event.set()  # Not paused initially
         
         self.container: Optional[av.container.InputContainer] = None
         self.video_stream: Optional[av.video.stream.VideoStream] = None
@@ -103,8 +101,9 @@ class VideoDecoder(threading.Thread):
         
         try:
             while self._running:
-                # Handle pause
-                self._pause_event.wait()
+                # Handle pause - poll with timeout instead of blocking
+                while self._paused and self._running:
+                    time.sleep(0.05)
                 
                 if not self._running:
                     break
@@ -133,8 +132,12 @@ class VideoDecoder(threading.Thread):
                             if self._seek_requested:
                                 break
                         
-                        # Wait if paused
-                        self._pause_event.wait()
+                        # Check pause - poll instead of blocking
+                        while self._paused and self._running:
+                            time.sleep(0.05)
+                        
+                        if not self._running:
+                            break
                         
                         # Convert frame to RGB numpy array
                         rgb_frame = frame.to_ndarray(format='rgb24')
@@ -148,10 +151,10 @@ class VideoDecoder(threading.Thread):
                             frame_number=frame_number
                         )
                         
-                        # Wait for space in queue (with timeout for responsiveness)
-                        while self._running and not self._seek_requested:
+                        # Wait for space in queue with pause checking
+                        while self._running and not self._seek_requested and not self._paused:
                             try:
-                                self.frame_queue.put(video_frame, timeout=0.1)
+                                self.frame_queue.put(video_frame, timeout=0.02)
                                 break
                             except queue.Full:
                                 continue
@@ -191,12 +194,10 @@ class VideoDecoder(threading.Thread):
     def pause(self):
         """Pause video decoding."""
         self._paused = True
-        self._pause_event.clear()
     
     def resume(self):
         """Resume video decoding."""
         self._paused = False
-        self._pause_event.set()
     
     def is_paused(self) -> bool:
         """Check if decoding is paused."""
@@ -205,7 +206,7 @@ class VideoDecoder(threading.Thread):
     def stop(self):
         """Stop the decoder thread."""
         self._running = False
-        self._pause_event.set()  # Unblock if paused
+        self._paused = False  # Unblock if paused
         if self.container:
             self.container.close()
     

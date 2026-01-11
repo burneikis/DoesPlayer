@@ -52,8 +52,6 @@ class AudioTrackPlayer(threading.Thread):
         self._seek_requested = False
         self._seek_target = 0.0
         self._lock = threading.Lock()
-        self._pause_event = threading.Event()
-        self._pause_event.set()
         
         self.container: Optional[av.container.InputContainer] = None
         self.audio_stream = None
@@ -152,8 +150,9 @@ class AudioTrackPlayer(threading.Thread):
         
         try:
             while self._running:
-                # Handle pause
-                self._pause_event.wait()
+                # Handle pause - poll with timeout
+                while self._paused and self._running:
+                    time.sleep(0.05)
                 
                 if not self._running:
                     break
@@ -181,8 +180,12 @@ class AudioTrackPlayer(threading.Thread):
                             if self._seek_requested:
                                 break
                         
-                        # Wait if paused
-                        self._pause_event.wait()
+                        # Check pause - poll instead of blocking
+                        while self._paused and self._running:
+                            time.sleep(0.05)
+                        
+                        if not self._running:
+                            break
                         
                         # Resample frame
                         resampled = resampler.resample(frame)
@@ -208,10 +211,10 @@ class AudioTrackPlayer(threading.Thread):
                                 duration=duration
                             )
                             
-                            # Wait for space in queue
-                            while self._running and not self._seek_requested:
+                            # Wait for space in queue with pause checking
+                            while self._running and not self._seek_requested and not self._paused:
                                 try:
-                                    self._audio_queue.put(chunk, timeout=0.1)
+                                    self._audio_queue.put(chunk, timeout=0.02)
                                     break
                                 except queue.Full:
                                     continue
@@ -250,12 +253,10 @@ class AudioTrackPlayer(threading.Thread):
     def pause(self):
         """Pause audio playback."""
         self._paused = True
-        self._pause_event.clear()
     
     def resume(self):
         """Resume audio playback."""
         self._paused = False
-        self._pause_event.set()
     
     def set_volume(self, volume: float):
         """Set volume (0.0 to 1.0)."""
@@ -276,7 +277,7 @@ class AudioTrackPlayer(threading.Thread):
     def stop(self):
         """Stop the audio player."""
         self._running = False
-        self._pause_event.set()
+        self._paused = False  # Unblock if paused
         if self.container:
             self.container.close()
     
