@@ -96,7 +96,7 @@ class AudioTrackPlayer(threading.Thread):
         if status:
             print(f"Audio status: {status}")
         
-        if self._paused or self._muted:
+        if self._paused:
             outdata.fill(0)
             return
         
@@ -107,15 +107,17 @@ class AudioTrackPlayer(threading.Thread):
             # Apply volume
             data = chunk.data * self._volume
             
-            # Handle size mismatch
-            if len(data) >= frames:
-                outdata[:] = data[:frames].reshape(-1, self.output_channels)
+            # Handle mute by zeroing data, but still update current_pts
+            if self._muted:
+                outdata.fill(0)
             else:
-                outdata[:len(data)] = data.reshape(-1, self.output_channels)
-                outdata[len(data):] = 0
-            
+                # Handle size mismatch
+                if len(data) >= frames:
+                    outdata[:] = data[:frames].reshape(-1, self.output_channels)
+                else:
+                    outdata[:len(data)] = data.reshape(-1, self.output_channels)
+                    outdata[len(data):] = 0
             self.current_pts = chunk.pts
-            
         except queue.Empty:
             outdata.fill(0)
     
