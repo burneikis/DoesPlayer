@@ -332,20 +332,25 @@ class AudioManager:
         try:
             container = av.open(self.file_path)
             self._track_info = []
-            
             for stream in container.streams:
                 if stream.type == 'audio':
+                    # Get language and make it user-friendly
+                    lang = getattr(stream, 'language', None)
+                    if not lang or lang.lower() == 'und':
+                        # Try to use codec name or fallback to Track N
+                        codec = stream.codec_context.name if stream.codec_context else 'unknown'
+                        label = f"Track {len(self._track_info) + 1} ({codec})"
+                    else:
+                        label = lang
                     self._track_info.append({
                         'index': stream.index,
                         'channels': stream.channels,
                         'sample_rate': stream.sample_rate,
                         'codec': stream.codec_context.name if stream.codec_context else 'unknown',
-                        'language': stream.language or f'Track {len(self._track_info) + 1}'
+                        'language': label
                     })
-            
             container.close()
             return self._track_info
-            
         except Exception as e:
             print(f"Error discovering tracks: {e}")
             return []
