@@ -240,3 +240,71 @@ class VideoDecoder(threading.Thread):
                         'language': stream.language or f'Track {len(tracks) + 1}'
                     })
         return tracks
+
+    def get_frame_at_position(self, target_pts: float) -> Optional[VideoFrame]:
+        """
+        Get a single frame at or just after the target position.
+        
+        This performs a seek to the nearest keyframe before target_pts,
+        then decodes forward until reaching the target frame.
+        
+        Args:
+            target_pts: Target presentation timestamp in seconds
+            
+        Returns:
+            VideoFrame at the target position, or None if not found
+        """
+        if not self.container or not self.video_stream:
+            return None
+        
+        target_pts = max(0.0, min(target_pts, self.duration))
+        
+        try:
+            # Create a separate container for frame-accurate seeking
+            # This avoids interfering with the main decode thread
+            with av.open(self.file_path) as seek_container:
+                video_stream = None
+                for stream in seek_container.streams:
+                    if stream.type == 'video':
+                        video_stream = stream
+                        break
+                
+                if video_stream is None:
+                    return None
+                
+                # Seek to keyframe before target
+                target_ts = int(target_pts / video_stream.time_base)
+                seek_container.seek(target_ts, stream=video_stream, backward=True)
+                
+                # Decode frames until we reach or pass the target
+                last_frame = None
+                frame_number = int(target_pts * self.fps)
+                
+                for frame in seek_container.decode(video=0):
+                    pts = float(frame.pts * video_stream.time_base) if frame.pts else 0.0
+                    
+                    # Convert frame to RGB
+                    rgb_frame = frame.to_ndarray(format='rgb24')
+                    video_frame = VideoFrame(
+                        image=rgb_frame,
+                        pts=pts,
+                        frame_number=int(pts * self.fps)
+                    )
+                    
+                    # If this frame is at or past our target, return it
+                    if pts >= target_pts - (0.5 / self.fps):
+                        return video_frame
+                    
+                    last_frame = video_frame
+                
+                # If we ran out of frames, return the last one we found
+                return last_frame
+                
+        except Exception as e:
+            print(f"Error getting frame at position {target_pts}: {e}")
+            return None
+
+    @property
+    def frame_duration(self) -> float:
+        """Get duration of a single frame in seconds."""
+        return 1.0 / self.fps if self.fps > 0 else 1.0 / DEFAULT_FPS

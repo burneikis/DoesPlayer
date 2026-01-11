@@ -412,6 +412,72 @@ class VideoPlayer:
         sign = "+" if seconds > 0 else ""
         self.widget.show_notification(f"Skip {sign}{int(seconds)}s", 600)
 
+    def step_frame(self, direction: int):
+        """
+        Step forward or backward by one frame.
+        
+        Args:
+            direction: 1 for forward, -1 for backward
+        """
+        if not self._video_decoder:
+            return
+        
+        # Pause playback if playing
+        was_playing = self._is_playing
+        if was_playing:
+            self.pause()
+        
+        # Calculate target position (one frame forward or backward)
+        frame_duration = self._video_decoder.frame_duration
+        current_pos = self._current_pts
+        target_pos = current_pos + (direction * frame_duration)
+        
+        # Clamp to valid range
+        target_pos = max(0.0, min(target_pos, self._duration - frame_duration))
+        
+        # Don't step if we're already at the boundary
+        if direction < 0 and current_pos <= 0.001:
+            self.widget.show_notification("Start", NOTIFICATION_DURATION_MS)
+            return
+        if direction > 0 and current_pos >= self._duration - frame_duration:
+            self.widget.show_notification("End", NOTIFICATION_DURATION_MS)
+            return
+        
+        # Get the frame at the target position
+        frame = self._video_decoder.get_frame_at_position(target_pos)
+        
+        if frame:
+            # Display the frame
+            self.widget.video_widget.display_frame(frame.image)
+            self._current_pts = frame.pts
+            self._playback_start_pts = frame.pts
+            
+            # Update UI
+            self.widget.controls.set_position(frame.pts)
+            self.widget.update_time_display(frame.pts, self._duration)
+            
+            # Sync audio position for when playback resumes
+            if self._audio_manager:
+                self._audio_manager.seek_all(frame.pts)
+            
+            # Clear the frame queue since we've manually positioned
+            while not self._frame_queue.empty():
+                try:
+                    self._frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+            
+            # Request video decoder to seek to new position
+            self._video_decoder.seek(frame.pts)
+            
+            # Show frame number notification
+            frame_num = int(frame.pts * self._fps) + 1
+            total_frames = int(self._duration * self._fps)
+            arrow = "→" if direction > 0 else "←"
+            self.widget.show_notification(f"{arrow} Frame {frame_num}/{total_frames}", NOTIFICATION_DURATION_MS)
+        else:
+            self.widget.show_notification("Frame not found", NOTIFICATION_DURATION_MS)
+
     @property
     def is_playing(self) -> bool:
         return self._is_playing
@@ -518,6 +584,10 @@ class MainWindow(QMainWindow):
 
         if key == Qt.Key.Key_Space:
             self.player.toggle_playback()
+        elif key == Qt.Key.Key_Left:
+            self.player.step_frame(-1)  # Step back one frame
+        elif key == Qt.Key.Key_Right:
+            self.player.step_frame(1)  # Step forward one frame
         elif key == Qt.Key.Key_Up:
             self.player.adjust_volume(VOLUME_STEP)
         elif key == Qt.Key.Key_Down:
