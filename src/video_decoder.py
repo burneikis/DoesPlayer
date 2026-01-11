@@ -196,7 +196,10 @@ class VideoDecoder(threading.Thread):
         self._paused = True
     
     def resume(self):
-        """Resume video decoding."""
+        """Resume video decoding. Does nothing if at end of stream."""
+        if not self._running:
+            # At end of stream, do nothing
+            return
         self._paused = False
     
     def is_paused(self) -> bool:

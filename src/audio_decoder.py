@@ -261,7 +261,10 @@ class AudioTrackPlayer(threading.Thread):
         self._paused = True
     
     def resume(self):
-        """Resume audio playback."""
+        """Resume audio playback. Does nothing if at end of stream."""
+        if not self._running:
+            # At end of stream, do nothing
+            return
         self._paused = False
     
     def set_volume(self, volume: float):

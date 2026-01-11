@@ -131,13 +131,25 @@ class VideoPlayer:
         return self._playback_start_pts + elapsed
     
     def play(self):
-        """Start or resume playback."""
+        """Start or resume playback. Does nothing if at end of stream."""
         if not self._video_decoder:
             return
-        
+
+
+        # Only block play/resume if at end of stream AND current position is at or beyond duration
+        at_end = (
+            not self._video_decoder.is_alive()
+            and hasattr(self._video_decoder, '_running')
+            and not self._video_decoder._running
+            and hasattr(self._video_decoder, 'duration')
+            and self._current_pts >= getattr(self._video_decoder, 'duration', float('inf')) - 0.01
+        )
+        if at_end:
+            return
+
         if not self._is_playing:
             self._is_playing = True
-            
+
             # Start video decoder if not already running
             if not self._video_decoder.is_alive():
                 self._video_decoder.start()
