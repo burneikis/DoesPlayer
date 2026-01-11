@@ -19,6 +19,13 @@ from src.video_decoder import VideoDecoder, VideoFrame
 from src.audio_decoder import AudioManager
 from src.gui import MainPlayerWidget
 
+# Constants
+FRAME_QUEUE_SIZE = 60
+INITIAL_BUFFER_DELAY_MS = 100
+POSITION_UPDATE_INTERVAL_MS = 100
+VOLUME_STEP = 0.05
+NOTIFICATION_DURATION_MS = 600
+
 
 class VideoPlayer:
     """
@@ -32,7 +39,7 @@ class VideoPlayer:
         self.widget = widget
         
         self._file_path: Optional[str] = None
-        self._frame_queue: queue.Queue = queue.Queue(maxsize=60)
+        self._frame_queue: queue.Queue = queue.Queue(maxsize=FRAME_QUEUE_SIZE)
         
         self._video_decoder: Optional[VideoDecoder] = None
         self._audio_manager: Optional[AudioManager] = None
@@ -58,7 +65,7 @@ class VideoPlayer:
         # Position update timer
         self._position_timer = QTimer()
         self._position_timer.timeout.connect(self._update_position_display)
-        self._position_timer.setInterval(100)  # Update every 100ms
+        self._position_timer.setInterval(POSITION_UPDATE_INTERVAL_MS)
         
         self._setup_connections()
     
@@ -76,11 +83,16 @@ class VideoPlayer:
     
     def open_file(self, file_path: str):
         """Open a video file."""
+        # Validate file exists
+        if not Path(file_path).exists():
+            self.widget.show_notification("File not found", 2000)
+            return
+        
         # Stop any existing playback
         self.stop()
         
         self._file_path = file_path
-        self._frame_queue = queue.Queue(maxsize=60)
+        self._frame_queue = queue.Queue(maxsize=FRAME_QUEUE_SIZE)
         
         # Initialize video decoder
         self._video_decoder = VideoDecoder(
@@ -135,16 +147,8 @@ class VideoPlayer:
         if not self._video_decoder:
             return
 
-
         # Only block play/resume if at end of stream AND current position is at or beyond duration
-        at_end = (
-            not self._video_decoder.is_alive()
-            and hasattr(self._video_decoder, '_running')
-            and not self._video_decoder._running
-            and hasattr(self._video_decoder, 'duration')
-            and self._current_pts >= getattr(self._video_decoder, 'duration', float('inf')) - 0.01
-        )
-        if at_end:
+        if self._video_decoder.is_finished and self._current_pts >= self._duration - 0.01:
             return
 
         if not self._is_playing:
@@ -154,7 +158,7 @@ class VideoPlayer:
             if not self._video_decoder.is_alive():
                 self._video_decoder.start()
                 # Give decoder time to buffer initial frames
-                QTimer.singleShot(100, self._start_playback)
+                QTimer.singleShot(INITIAL_BUFFER_DELAY_MS, self._start_playback)
             else:
                 self._video_decoder.resume()
                 self._start_playback()
@@ -170,11 +174,9 @@ class VideoPlayer:
         
         # Start audio
         if self._audio_manager and self._audio_manager.players:
-            # Check if audio threads need to be restarted
-            # A thread that's not alive but has ident set means it ran and finished
+            # Check if audio threads need to be restarted (finished playback)
             needs_restart = any(
-                not p.is_alive() and p.ident is not None
-                for p in self._audio_manager.players.values()
+                p.is_finished for p in self._audio_manager.players.values()
             )
             
             if needs_restart:
@@ -234,15 +236,15 @@ class VideoPlayer:
                 break
         
         if self._video_decoder:
-            # Check if decoder thread has stopped (e.g., reached end of video)
+            # Check if decoder thread has finished (e.g., reached end of video)
             # If so, we need to create a new decoder since threads can't be restarted
-            if not self._video_decoder.is_alive():
+            if self._video_decoder.is_finished or not self._video_decoder.is_alive():
                 # Store the file path before stopping
                 file_path = self._video_decoder.file_path
                 self._video_decoder.stop()
                 
                 # Create a new decoder
-                self._frame_queue = queue.Queue(maxsize=60)
+                self._frame_queue = queue.Queue(maxsize=FRAME_QUEUE_SIZE)
                 self._video_decoder = VideoDecoder(
                     file_path=file_path,
                     frame_queue=self._frame_queue,
@@ -383,12 +385,12 @@ class VideoPlayer:
         """Toggle play/pause state."""
         if self._is_playing:
             self.pause()
-            self.widget.show_notification("Pause", 600)
+            self.widget.show_notification("Pause", NOTIFICATION_DURATION_MS)
         else:
             self.play()
-            self.widget.show_notification("Play", 600)
+            self.widget.show_notification("Play", NOTIFICATION_DURATION_MS)
 
-    def change_volume(self, delta: float):
+    def adjust_volume(self, delta: float):
         """Change master volume by delta amount."""
         if not self._audio_manager:
             return
@@ -399,9 +401,9 @@ class VideoPlayer:
         for i in range(len(self._audio_manager.players)):
             self._audio_manager.set_track_volume(i, self._master_volume)
             self.widget.audio_panel.set_track_volume(i, self._master_volume)
-        self.widget.show_notification(f"Volume: {int(self._master_volume * 100)}%", 600)
+        self.widget.show_notification(f"Volume: {int(self._master_volume * 100)}%", NOTIFICATION_DURATION_MS)
 
-    def skip_time(self, seconds: float):
+    def skip_forward_backward(self, seconds: float):
         """Skip forward or backward by the given number of seconds."""
         if not self._video_decoder:
             return
@@ -517,17 +519,17 @@ class MainWindow(QMainWindow):
         if key == Qt.Key.Key_Space:
             self.player.toggle_playback()
         elif key == Qt.Key.Key_Up:
-            self.player.change_volume(0.05)
+            self.player.adjust_volume(VOLUME_STEP)
         elif key == Qt.Key.Key_Down:
-            self.player.change_volume(-0.05)
+            self.player.adjust_volume(-VOLUME_STEP)
         elif key == Qt.Key.Key_BracketLeft:
-            self.player.skip_time(-5)  # [ = 5s back
+            self.player.skip_forward_backward(-5)  # [ = 5s back
         elif key == Qt.Key.Key_BracketRight:
-            self.player.skip_time(10)  # ] = 10s forward
+            self.player.skip_forward_backward(10)  # ] = 10s forward
         elif key == Qt.Key.Key_BraceLeft:
-            self.player.skip_time(-15)  # { = 15s back (Shift+[)
+            self.player.skip_forward_backward(-15)  # { = 15s back (Shift+[)
         elif key == Qt.Key.Key_BraceRight:
-            self.player.skip_time(30)  # } = 30s forward (Shift+])
+            self.player.skip_forward_backward(30)  # } = 30s forward (Shift+])
         else:
             super().keyPressEvent(event)
     

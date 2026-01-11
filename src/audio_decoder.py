@@ -9,10 +9,18 @@ import threading
 import queue
 import time
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Callable
+from typing import Optional, Dict, List
 import av
 import numpy as np
 import sounddevice as sd
+
+# Constants
+PAUSE_POLL_INTERVAL = 0.05  # seconds
+QUEUE_PUT_TIMEOUT = 0.02  # seconds
+AUDIO_QUEUE_SIZE = 100
+AUDIO_BLOCK_SIZE = 1024
+DEFAULT_SAMPLE_RATE = 44100
+DEFAULT_CHANNELS = 2
 
 
 @dataclass
@@ -47,6 +55,7 @@ class AudioTrackPlayer(threading.Thread):
         
         self._running = False
         self._paused = False
+        self._finished = False  # Explicit end-of-stream flag
         self._volume = 1.0
         self._muted = False
         self._seek_requested = False
@@ -55,12 +64,12 @@ class AudioTrackPlayer(threading.Thread):
         
         self.container: Optional[av.container.InputContainer] = None
         self.audio_stream = None
-        self.sample_rate: int = 44100
-        self.channels: int = 2
+        self.sample_rate: int = DEFAULT_SAMPLE_RATE
+        self.channels: int = DEFAULT_CHANNELS
         self.current_pts: float = 0.0
         
         # Audio buffer queue
-        self._audio_queue: queue.Queue = queue.Queue(maxsize=100)
+        self._audio_queue: queue.Queue = queue.Queue(maxsize=AUDIO_QUEUE_SIZE)
         self._sd_stream: Optional[sd.OutputStream] = None
         
     def open(self) -> bool:
@@ -79,8 +88,8 @@ class AudioTrackPlayer(threading.Thread):
                 print(f"Audio stream {self.stream_index} not found")
                 return False
             
-            self.sample_rate = self.audio_stream.sample_rate or 44100
-            self.channels = self.audio_stream.channels or 2
+            self.sample_rate = self.audio_stream.sample_rate or DEFAULT_SAMPLE_RATE
+            self.channels = self.audio_stream.channels or DEFAULT_CHANNELS
             
             # Limit channels to stereo for compatibility
             self.output_channels = min(self.channels, 2)
@@ -127,6 +136,7 @@ class AudioTrackPlayer(threading.Thread):
             return
         
         self._running = True
+        self._finished = False
         
         # Create resampler to convert to float32 planar
         resampler = av.audio.resampler.AudioResampler(
@@ -142,7 +152,7 @@ class AudioTrackPlayer(threading.Thread):
                 channels=self.output_channels,
                 dtype='float32',
                 callback=self._audio_callback,
-                blocksize=1024,
+                blocksize=AUDIO_BLOCK_SIZE,
                 device=self.output_device,
             )
             self._sd_stream.start()
@@ -154,7 +164,7 @@ class AudioTrackPlayer(threading.Thread):
             while self._running:
                 # Handle pause - poll with timeout
                 while self._paused and self._running:
-                    time.sleep(0.05)
+                    time.sleep(PAUSE_POLL_INTERVAL)
                 
                 if not self._running:
                     break
@@ -188,7 +198,7 @@ class AudioTrackPlayer(threading.Thread):
                             
                             # Check pause - poll instead of blocking
                             while self._paused and self._running:
-                                time.sleep(0.05)
+                                time.sleep(PAUSE_POLL_INTERVAL)
                             
                             if not self._running:
                                 break
@@ -220,16 +230,18 @@ class AudioTrackPlayer(threading.Thread):
                                 # Wait for space in queue with pause checking
                                 while self._running and not self._seek_requested and not self._paused:
                                     try:
-                                        self._audio_queue.put(chunk, timeout=0.02)
+                                        self._audio_queue.put(chunk, timeout=QUEUE_PUT_TIMEOUT)
                                         break
                                     except queue.Full:
                                         continue
                     else:
                         # End of stream
+                        self._finished = True
                         self._running = False
                         break
                         
                 except av.error.EOFError:
+                    self._finished = True
                     self._running = False
                     break
                 except Exception as e:
@@ -237,9 +249,13 @@ class AudioTrackPlayer(threading.Thread):
                     continue
                     
         finally:
+            self._finished = True
             if self._sd_stream:
                 self._sd_stream.stop()
                 self._sd_stream.close()
+            if self.container:
+                self.container.close()
+                self.container = None
     
     def _perform_seek(self):
         """Perform seek operation."""
@@ -283,12 +299,16 @@ class AudioTrackPlayer(threading.Thread):
         """Check if muted."""
         return self._muted
     
+    @property
+    def is_finished(self) -> bool:
+        """Check if player has reached end of stream."""
+        return self._finished and not self._running
+    
     def stop(self):
         """Stop the audio player."""
         self._running = False
         self._paused = False  # Unblock if paused
-        if self.container:
-            self.container.close()
+        # Container cleanup is handled in the run() finally block
     
     def get_current_pts(self) -> float:
         """Get current playback position."""

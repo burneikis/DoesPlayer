@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from typing import Optional, Callable
 import av
 import numpy as np
-
+# Constants
+PAUSE_POLL_INTERVAL = 0.05  # seconds
+QUEUE_PUT_TIMEOUT = 0.02  # seconds
+DEFAULT_FPS = 30.0
 
 @dataclass
 class VideoFrame:
@@ -45,6 +48,7 @@ class VideoDecoder(threading.Thread):
         
         self._running = False
         self._paused = False
+        self._finished = False  # Explicit end-of-stream flag
         self._seek_requested = False
         self._seek_target = 0.0
         self._lock = threading.Lock()
@@ -52,7 +56,7 @@ class VideoDecoder(threading.Thread):
         self.container: Optional[av.container.InputContainer] = None
         self.video_stream: Optional[av.video.stream.VideoStream] = None
         self.duration: float = 0.0
-        self.fps: float = 30.0
+        self.fps: float = DEFAULT_FPS
         self.width: int = 0
         self.height: int = 0
         
@@ -97,13 +101,14 @@ class VideoDecoder(threading.Thread):
             return
             
         self._running = True
+        self._finished = False
         frame_number = 0
         
         try:
             while self._running:
                 # Handle pause - poll with timeout instead of blocking
                 while self._paused and self._running:
-                    time.sleep(0.05)
+                    time.sleep(PAUSE_POLL_INTERVAL)
                 
                 if not self._running:
                     break
@@ -134,7 +139,7 @@ class VideoDecoder(threading.Thread):
                         
                         # Check pause - poll instead of blocking
                         while self._paused and self._running:
-                            time.sleep(0.05)
+                            time.sleep(PAUSE_POLL_INTERVAL)
                         
                         if not self._running:
                             break
@@ -154,7 +159,7 @@ class VideoDecoder(threading.Thread):
                         # Wait for space in queue with pause checking
                         while self._running and not self._seek_requested and not self._paused:
                             try:
-                                self.frame_queue.put(video_frame, timeout=0.02)
+                                self.frame_queue.put(video_frame, timeout=QUEUE_PUT_TIMEOUT)
                                 break
                             except queue.Full:
                                 continue
@@ -162,10 +167,12 @@ class VideoDecoder(threading.Thread):
                         frame_number += 1
                     else:
                         # End of stream reached
+                        self._finished = True
                         self._running = False
                         break
                         
                 except av.error.EOFError:
+                    self._finished = True
                     self._running = False
                     break
                 except Exception as e:
@@ -173,7 +180,7 @@ class VideoDecoder(threading.Thread):
                     continue
                     
         finally:
-            pass
+            self._finished = True
     
     def _perform_seek(self):
         """Perform the actual seek operation."""
@@ -190,6 +197,12 @@ class VideoDecoder(threading.Thread):
         with self._lock:
             self._seek_target = max(0.0, min(position, self.duration))
             self._seek_requested = True
+            self._finished = False  # Reset finished flag on seek
+    
+    @property
+    def is_finished(self) -> bool:
+        """Check if decoder has reached end of stream."""
+        return self._finished and not self._running
     
     def pause(self):
         """Pause video decoding."""
