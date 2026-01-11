@@ -157,8 +157,25 @@ class VideoPlayer:
         self._playback_start_pts = self._current_pts
         
         # Start audio
-        if self._audio_manager:
-            if not any(p.is_alive() for p in self._audio_manager.players.values()):
+        if self._audio_manager and self._audio_manager.players:
+            # Check if audio threads need to be restarted
+            # A thread that's not alive but has ident set means it ran and finished
+            needs_restart = any(
+                not p.is_alive() and p.ident is not None
+                for p in self._audio_manager.players.values()
+            )
+            
+            if needs_restart:
+                # Recreate audio manager since threads can't be restarted
+                file_path = self._audio_manager.file_path
+                self._audio_manager.stop_all()
+                self._audio_manager = AudioManager(file_path)
+                tracks = self._audio_manager.discover_tracks()
+                if tracks:
+                    self._audio_manager.initialize_all_tracks()
+                    self._audio_manager.seek_all(self._current_pts)
+                    self._audio_manager.start_all()
+            elif not any(p.is_alive() for p in self._audio_manager.players.values()):
                 self._audio_manager.start_all()
             else:
                 self._audio_manager.resume_all()
@@ -205,9 +222,44 @@ class VideoPlayer:
                 break
         
         if self._video_decoder:
-            self._video_decoder.seek(position)
-        
-        if self._audio_manager:
+            # Check if decoder thread has stopped (e.g., reached end of video)
+            # If so, we need to create a new decoder since threads can't be restarted
+            if not self._video_decoder.is_alive():
+                # Store the file path before stopping
+                file_path = self._video_decoder.file_path
+                self._video_decoder.stop()
+                
+                # Create a new decoder
+                self._frame_queue = queue.Queue(maxsize=60)
+                self._video_decoder = VideoDecoder(
+                    file_path=file_path,
+                    frame_queue=self._frame_queue,
+                    on_duration=self._on_duration_received,
+                    on_fps=self._on_fps_received,
+                )
+                self._video_decoder.open()
+                self._video_decoder.seek(position)
+                
+                # Also recreate audio manager since its threads can't be restarted either
+                if self._audio_manager:
+                    self._audio_manager.stop_all()
+                    self._audio_manager = AudioManager(file_path)
+                    tracks = self._audio_manager.discover_tracks()
+                    if tracks:
+                        self._audio_manager.initialize_all_tracks()
+                        # Seek audio to the same position
+                        self._audio_manager.seek_all(position)
+                
+                # Start the new decoder if we're playing
+                if self._is_playing:
+                    self._video_decoder.start()
+                    if self._audio_manager:
+                        self._audio_manager.start_all()
+            else:
+                self._video_decoder.seek(position)
+                if self._audio_manager:
+                    self._audio_manager.seek_all(position)
+        elif self._audio_manager:
             self._audio_manager.seek_all(position)
         
         self.widget.controls.set_position(position)
