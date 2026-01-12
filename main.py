@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog
 from PyQt6.QtCore import Qt, QTimer, QSettings
-from PyQt6.QtGui import QKeyEvent, QPalette, QColor
+from PyQt6.QtGui import QKeyEvent, QPalette, QColor, QIcon
 
 from src.video_decoder import VideoDecoder, VideoFrame
 from src.audio_decoder import AudioManager
@@ -500,6 +500,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("DoesPlayer")
         self.setMinimumSize(800, 600)
+        
+        # Set window icon
+        icon_path = Path(__file__).parent / "assets" / "doesplayer.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         
         # Load saved geometry or use defaults
         self._settings = QSettings("DoesPlayer", "DoesPlayer")
