@@ -46,8 +46,8 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 ; Interface Settings
 
 !define MUI_ABORTWARNING
-!define MUI_ICON "assets\icon.ico"
-!define MUI_UNICON "assets\icon.ico"
+;!define MUI_ICON "assets\icon.ico"
+;!define MUI_UNICON "assets\icon.ico"
 
 ; Welcome page settings
 !define MUI_WELCOMEPAGE_TITLE "Welcome to ${APP_NAME} Setup"
@@ -64,7 +64,7 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 
 ; Installer pages
 !insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_LICENSE "LICENSE"
+;!insertmacro MUI_PAGE_LICENSE "LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
