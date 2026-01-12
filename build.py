@@ -26,7 +26,7 @@ APP_AUTHOR = "DoesPlayer Team"
 APP_DESCRIPTION = "A high-performance video player with multitrack audio support"
 MAIN_SCRIPT = "main.py"
 ICON_MACOS = "assets/icon.icns"
-ICON_WINDOWS = "assets/icon.ico"
+ICON_WINDOWS = "assets/doesplayer.ico"
 
 # Directories
 BUILD_DIR = Path("build")
