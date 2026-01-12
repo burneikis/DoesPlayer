@@ -128,7 +128,8 @@ def get_pyinstaller_args():
     
     # Add source files
     args.extend(["--add-data", f"src{os.pathsep}src"])
-    
+    args.extend(["--add-data", f"assets{os.pathsep}assets"])
+
     # Platform-specific options
     if system == "Darwin":
         args.extend([

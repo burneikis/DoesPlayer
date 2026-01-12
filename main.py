@@ -10,6 +10,7 @@ import time
 import queue
 from typing import Optional
 from pathlib import Path
+import os
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog
 from PyQt6.QtCore import Qt, QTimer, QSettings
@@ -18,6 +19,21 @@ from PyQt6.QtGui import QKeyEvent, QPalette, QColor, QIcon
 from src.video_decoder import VideoDecoder, VideoFrame
 from src.audio_decoder import AudioManager
 from src.gui import MainPlayerWidget
+
+# Helper for PyInstaller asset path
+def get_asset_path():
+    import sys
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS) / "assets"
+    else:
+        return Path(__file__).parent / "assets"
+
+def get_icon_path():
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, 'assets', 'doesplayer.ico')
 
 # Constants
 FRAME_QUEUE_SIZE = 60
@@ -501,10 +517,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("DoesPlayer")
         self.setMinimumSize(800, 600)
         
-        # Set window icon
-        icon_path = Path(__file__).parent / "assets" / "doesplayer.ico"
-        if icon_path.exists():
-            self.setWindowIcon(QIcon(str(icon_path)))
+        # Set window icon (works for both dev and PyInstaller bundle)
+        icon_path = get_icon_path()
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         
         # Load saved geometry or use defaults
         self._settings = QSettings("DoesPlayer", "DoesPlayer")
@@ -641,11 +657,11 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DoesPlayer")
     app.setStyle("Fusion")
-    
-    # Set application icon
-    icon_path = Path(__file__).parent / "assets" / "doesplayer.ico"
-    if icon_path.exists():
-        app.setWindowIcon(QIcon(str(icon_path)))
+
+    # Set application icon (GoodPlayer style)
+    icon_path = get_icon_path()
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     
     # Dark theme palette
     palette = QPalette()
