@@ -501,6 +501,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("DoesPlayer")
         self.setMinimumSize(800, 600)
         
+        # Set window icon
+        icon_path = Path(__file__).parent / "assets" / "doesplayer.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+        
         # Load saved geometry or use defaults
         self._settings = QSettings("DoesPlayer", "DoesPlayer")
         self._restore_geometry()
