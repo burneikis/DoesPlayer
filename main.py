@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QFileDialog
 from PyQt6.QtCore import Qt, QTimer, QSettings
-from PyQt6.QtGui import QKeyEvent, QPalette, QColor
+from PyQt6.QtGui import QKeyEvent, QPalette, QColor, QIcon
 
 from src.video_decoder import VideoDecoder, VideoFrame
 from src.audio_decoder import AudioManager
@@ -636,6 +636,11 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DoesPlayer")
     app.setStyle("Fusion")
+    
+    # Set application icon
+    icon_path = Path(__file__).parent / "assets" / "doesplayer.ico"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     
     # Dark theme palette
     palette = QPalette()
